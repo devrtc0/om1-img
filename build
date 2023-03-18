@@ -1,0 +1,294 @@
+#!/usr/bin/env sh
+
+COLORS="true"
+HOSTNAME="m1"
+FILESYSTEM="ext4"
+COMPRESSION="zstd"
+RECREATE_IMG="false"
+REMOVE_ROOTFS="false"
+COMPRESS="false"
+AFTER_COMPRESS_REMOVE_ROOTFS="false"
+PROGNAME=${0##*/}
+CURDIR="$(dirname $(readlink -f "$0"))"
+LIBDIR="${CURDIR}/lib"
+VERSION=$(date +'%y'.'%m'.'%d')
+IMGNAME="alarm-odroid-m1-${VERSION}"
+ROOTFS_IMG="${CURDIR}/img"
+TMPDIR="${CURDIR}/tmp"
+CHROOTDIR="${ROOTFS_IMG}/rootfs"
+PKG_CACHE="${CHROOTDIR}/var/cache/pacman/pkg"
+NSPAWN="systemd-nspawn -q --resolv-conf=copy-host --timezone=off -D"
+PKGDIR="/var/cache/alarm/pkg"
+IMGDIR="/var/cache/alarm/img"
+
+mkdir -p ${PKGDIR}/pkg-cache
+mkdir -p ${IMGDIR}
+
+enable_colors() {
+    ALL_OFF="\e[1;0m"
+    BOLD="\e[1;1m"
+    GREEN="${BOLD}\e[1;32m"
+    BLUE="${BOLD}\e[1;34m"
+
+    PACMAN_COLORS='--color=always'
+    PACCACHE_COLORS=''
+    MAKEPKG_COLORS=''
+}
+info() {
+    local mesg=$1; shift
+    printf "${BLUE}  ->${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@"
+}
+error() {
+    local mesg=$1; shift
+    printf "${RED}==> ERROR:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@"
+}
+cleanup() {
+    umount $PKG_CACHE
+    exit ${1:-0}
+}
+abort() {
+    error 'Aborting...'
+    cleanup 255
+}
+prune_cache(){
+    info "Pruning and unmounting package cache..."
+    $NSPAWN $CHROOTDIR paccache -r $PACCACHE_COLORS
+    umount $PKG_CACHE
+}
+msg() {
+    local mesg=$1; shift
+    printf "\n${GREEN}==>${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@"
+}
+get_timer(){
+    echo $(date +%s)
+}
+elapsed_time(){
+    echo $(echo $1 $(get_timer) | awk '{ printf "%0.2f",($2-$1)/60 }')
+}
+show_elapsed_time(){
+    msg "Time elapsed: %s minute(s)" "$(elapsed_time $1)"
+}
+check_deps () {
+	pacman -Qii qemu-user-static-binfmt >/dev/null 2>&1 || error 'qemu-user-static-binfmt is not installed'
+}
+check_root () {
+    if [ "$EUID" -ne 0 ]; then
+        echo "This utility requires root permissions to run"
+        exit
+    fi
+}
+check_running() {
+    for pid in $(pidof -x $PROGNAME); do
+        if [ $pid != $$ ]; then
+            echo "Process already running as PID $pid"
+            exit 1
+        fi
+    done
+}
+create_rootfs_img() {
+	msg "Creating rootfs image..."
+
+	if [ "$REMOVE_ROOTFS" = "true" ]; then
+		if [ -d "$ROOTFS_IMG/rootfs" ]; then
+	        info "Removing old rootfs..."
+	        rm -rf $ROOTFS_IMG/rootfs
+	    fi
+	fi
+	mkdir -p $ROOTFS_IMG/rootfs
+	if [ $(ls "$ROOTFS_IMG/rootfs" | wc -l) -eq 0 ]; then
+		if [ ! -f "$CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz" ]; then
+			echo "No rootfs archive '$CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz'"
+	        exit 1
+	    fi
+	    info "Extracting rootfs..."
+	    bsdtar -xpf $CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz -C $ROOTFS_IMG/rootfs
+	fi
+
+    info "Setting up keyrings..."
+    $NSPAWN $ROOTFS_IMG/rootfs pacman-key --init >/dev/null || abort
+    $NSPAWN $ROOTFS_IMG/rootfs pacman-key --populate archlinuxarm >/dev/null || abort
+
+    echo "Server = https://mirror.yandex.ru/archlinux-arm/\$arch/\$repo" > $ROOTFS_IMG/rootfs/etc/pacman.d/mirrorlist
+
+    msg "Installing packages..."
+    mount --bind $PKGDIR/pkg-cache $PKG_CACHE
+    $NSPAWN $ROOTFS_IMG/rootfs \
+                    pacman -Syyu base systemd systemd-libs dialog \
+                                 sudo openssh micro dhcpcd man-pages man-db usbutils zram-generator irqbalance exfatprogs \
+                                 iwd pacman-contrib \
+                                 linux-aarch64 \
+                                  --noconfirm --needed --noprogressbar $PACMAN_COLORS || abort
+    
+    info "Enabling services..."
+    $NSPAWN $ROOTFS_IMG/rootfs systemctl enable getty.target > /dev/null 2>&1
+    $NSPAWN $ROOTFS_IMG/rootfs systemctl enable pacman-init.service > /dev/null 2>&1
+
+    local SERVICE
+    while read SERVICE; do
+        if [ -e $ROOTFS_IMG/rootfs/usr/lib/systemd/system/$SERVICE ]; then
+            echo "Enabling service $SERVICE..."
+            $NSPAWN $ROOTFS_IMG/rootfs systemctl enable $SERVICE > /dev/null 2>&1
+        else
+            echo "Service $SERVICE not found in rootfs, skipping"
+        fi
+    done < "$CURDIR/services_list"
+
+	info "Setting up system settings..."
+    $NSPAWN $ROOTFS_IMG/rootfs update-ca-trust
+    echo "$HOSTNAME" > $ROOTFS_IMG/rootfs/etc/hostname
+
+    echo "Enabling SSH login for root user for headless setup..."
+    sed -i s/"#PermitRootLogin prohibit-password"/"PermitRootLogin yes"/g $ROOTFS_IMG/rootfs/etc/ssh/sshd_config
+    sed -i s/"#PermitEmptyPasswords no"/"PermitEmptyPasswords yes"/g $ROOTFS_IMG/rootfs/etc/ssh/sshd_config
+
+    echo "Enabling autologin for first setup..."
+    mv $ROOTFS_IMG/rootfs/usr/lib/systemd/system/getty\@.service $ROOTFS_IMG/rootfs/usr/lib/systemd/system/getty\@.service.bak
+    cp $LIBDIR/getty\@.service $ROOTFS_IMG/rootfs/usr/lib/systemd/system/getty\@.service
+
+	echo "[zram0]" > $ROOTFS_IMG/rootfs/etc/systemd/zram-generator.conf
+
+    info "Removing unwanted files from rootfs..."
+    prune_cache
+    rm -f $ROOTFS_IMG/rootfs/usr/bin/qemu-aarch64-static
+    rm -f $ROOTFS_IMG/rootfs/var/log/* > /dev/null 2>&1
+    rm -rf $ROOTFS_IMG/rootfs/var/log/journal/*
+    rm -f $ROOTFS_IMG/rootfs/etc/*.pacnew
+    rm -f $ROOTFS_IMG/rootfs/usr/lib/systemd/system/systemd-firstboot.service
+    rm -f $ROOTFS_IMG/rootfs/etc/machine-id
+    rm -rf $ROOTFS_IMG/rootfs/etc/pacman.d/gnupg
+
+    msg "Creating rootfs image completed successfully"
+}
+create_img() {
+	msg "Creating image..."
+	info "Creating $FILESYSTEM partitions..."
+
+	SIZE=$(du -s --block-size=MB $CHROOTDIR | awk '{ print $1 }' | sed -e 's/MB//g')
+	info "Total size of packages $SIZE MB"
+    EXTRA_SIZE=500
+    REAL_SIZE=`echo "$(($SIZE+$EXTRA_SIZE))"`
+
+	# Make blank .img to be used
+    dd if=/dev/zero of=$IMGDIR/$IMGNAME.img bs=1M count=$REAL_SIZE > /dev/null 2>&1
+	# Load the loop kernel module
+    modprobe loop > /dev/null 2>&1
+    # Set up the loop device
+    LDEV=`losetup -f`
+    DEV=`echo $LDEV | cut -d "/" -f 3`
+    # Mount the image to the loop device
+    losetup -P $LDEV $IMGDIR/$IMGNAME.img > /dev/null 2>&1
+	# Clear the first 32 MB
+    dd if=/dev/zero of=${LDEV} bs=1M count=32 conv=fsync,notrunc > /dev/null 2>&1
+
+	# Create the boot and root partitions
+    parted -s $LDEV mklabel gpt >/dev/null 2>&1
+    parted -s $LDEV mkpart primary fat32 32M 512M >/dev/null 2>&1
+    START=`cat /sys/block/$DEV/${DEV}p1/start`
+    SIZE=`cat /sys/block/$DEV/${DEV}p1/size`
+    END_SECTOR=$(expr $START + $SIZE)
+    parted -s $LDEV mkpart primary ext4 "${END_SECTOR}s" 100% > /dev/null 2>&1
+    partprobe $LDEV > /dev/null 2>&1
+    mkfs.vfat "${LDEV}p1" -n BOOT_ARCH > /dev/null 2>&1
+    mkfs.ext4 -O ^metadata_csum,^64bit "${LDEV}p2" -L ROOT_ARCH > /dev/null 2>&1
+
+    # Copy the rootfs contents over to the filesystem
+    info "Copying files to image..."
+    mkdir -p $TMPDIR/root
+    mkdir -p $TMPDIR/boot
+    mount ${LDEV}p1 $TMPDIR/boot
+    mount ${LDEV}p2 $TMPDIR/root
+    cp -a $ROOTFS_IMG/rootfs/* $TMPDIR/root
+    mv $TMPDIR/root/boot/* $TMPDIR/boot
+	# Write the boot loader images
+    dd if=$TMPDIR/boot/idbloader.img of=${LDEV} seek=64 conv=notrunc,fsync > /dev/null 2>&1
+    dd if=$TMPDIR/boot/u-boot.itb of=${LDEV} seek=16384 conv=notrunc,fsync > /dev/null 2>&1
+    # Fetch the PARTUUIDs
+    BOOT_PART=$(lsblk -p -o NAME,PARTUUID | grep "${LDEV}p1" | awk '{ print $2 }')
+    ROOT_PART=$(lsblk -p -o NAME,PARTUUID | grep "${LDEV}p2" | awk '{ print $2 }')
+    ROOT_UUID=$(blkid | grep "${LDEV}p2" | awk '{print $3}' | grep -oP "[^/]=\K.*" | sed 's/\"//g')
+	echo "Boot PARTUUID is $BOOT_PART..."
+    echo "Root PARTUUID is $ROOT_PART..."
+	echo "Root UUID is $ROOT_UUID..."
+
+	# Adjust the fstab to use the boot PARTUUID
+	sed -i "s/LABEL=BOOT_ARCH/PARTUUID=$BOOT_PART/g" $TMPDIR/root/etc/fstab
+	# Adjust the boot loader configuration to use the root PARTUUID
+    if [ -f $TMPDIR/boot/extlinux/extlinux.conf ]; then
+        sed -i "s/LABEL=ROOT_ARCH/PARTUUID=$ROOT_PART/g" $TMPDIR/boot/extlinux/extlinux.conf
+    elif [ -f $TMPDIR/boot/efi/extlinux/extlinux.conf ]; then
+        sed -i "s/LABEL=ROOT_ARCH/PARTUUID=$ROOT_PART/g" $TMPDIR/boot/efi/extlinux/extlinux.conf
+    elif [ -f $TMPDIR/boot/boot.ini ]; then
+        sed -i "s/LABEL=ROOT_ARCH/PARTUUID=$ROOT_PART/g" $TMPDIR/boot/boot.ini
+    elif [ -f $TMPDIR/boot/uEnv.ini ]; then
+        sed -i "s/LABEL=ROOT_ARCH/PARTUUID=$ROOT_PART/g" $TMPDIR/boot/uEnv.ini
+    fi
+    echo "PARTUUID=$ROOT_PART   /   $FILESYSTEM     defaults    0   1" >> $TMPDIR/root/etc/fstab
+
+    # Clean up
+    info "Cleaning up image..."
+    umount $TMPDIR/root
+    umount $TMPDIR/boot
+
+    losetup -d $LDEV >/dev/null 2>&1
+    rm -rf $TMPDIR/boot/efi
+    rm -rf $TMPDIR/boot
+    rm -rf $TMPDIR/root
+    if [ $? -ne 0 ]; then
+        echo "Cleaning up image failed, aborting"
+        exit 1
+    fi
+    partprobe $LDEV > /dev/null 2>&1
+    chmod 0666 $IMGDIR/$IMGNAME.img
+}
+compress() {
+	info "Compressing $IMGNAME.img with $COMPRESSION..."
+    # Compress the image
+    cd $IMGDIR
+    case "$COMPRESSION" in
+        xz)
+            if [ -f $IMGDIR/$IMGNAME.img.xz ]; then
+                info "Removing existing compressed image file $IMGNAME.img.xz..."
+                rm -rf $IMGDIR/$IMGNAME.img.xz
+            fi
+            xz -zv --threads=0 $IMGNAME.img
+            chmod 0666 $IMGDIR/$IMGNAME.img.xz
+            ;;
+        zstd)
+            if [ -f $IMGDIR/$IMGNAME.img.zst ]; then
+                info "Removing existing compressed image file $IMGNAME.img.zst..."
+                rm -rf $IMGDIR/$IMGNAME.img.zst
+            fi
+            zstd -z -10 -T0 --rm $IMGNAME.img
+            chmod 0666 $IMGDIR/$IMGNAME.img.zst
+            ;;
+    esac
+
+	mount | grep "$ROOTFS_IMG/rootfs/var/cache/pacman/pkg"
+    STATUS=$?
+    [ $STATUS -eq 0 ] && umount $ROOTFS_IMG/rootfs_$ARCH/var/cache/pacman/pkg
+	if [ "$AFTER_COMPRESS_REMOVE_ROOTFS" = "true" ]; then
+		info "Removing rootfs..."
+	    rm -rf $CHROOTDIR
+	fi
+}
+# ********************************************************************
+# ********************************************************************
+# ********************************************************************
+
+[ "$COLORS" = "true" ] && enable_colors
+check_deps
+check_root
+check_running
+timer_start=$(get_timer)
+
+create_rootfs_img 2>&1
+
+if [ "$RECREATE_IMG" = "true" ]; then
+	create_img 2>&1
+fi
+
+if [ "$COMPRESS" = "true" ]; then
+	compress 2>&1
+fi
+
+show_elapsed_time "${timer_start}" 2>&1
