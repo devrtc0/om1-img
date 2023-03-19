@@ -291,12 +291,15 @@ compress() {
 . ./.env
 if [ -z "$CFG_USERNAME" ]; then
     error "CFG_USERNAME not set"
+    exit
 fi
 if [ -z "$CFG_USER_PASSWORD" ]; then
     error "CFG_USER_PASSWORD not set"
+    exit
 fi
 if [ -z "$CFG_ROOT_PASSWORD" ]; then
     error "CFG_ROOT_PASSWORD not set"
+    exit
 fi
 
 [ "$COLORS" = "true" ] && enable_colors
