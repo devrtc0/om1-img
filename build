@@ -161,6 +161,8 @@ ru_RU.UTF-8 UTF-8' > $ROOTFS_IMG/rootfs/etc/locale.gen
     echo "%wheel ALL=(ALL) ALL" > $ROOTFS_IMG/rootfs/etc/sudoers.d/wheel
 
     cp $LIBDIR/post-scriptum $ROOTFS_IMG/rootfs/home/${CFG_USERNAME}/
+    cp $LIBDIR/slp.sh $ROOTFS_IMG/rootfs/home/${CFG_USERNAME}/
+    cp $LIBDIR/start-ace.sh $ROOTFS_IMG/rootfs/home/${CFG_USERNAME}/
 
     info "Removing unwanted files from rootfs..."
     prune_cache

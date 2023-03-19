@@ -21,8 +21,8 @@ timedatectl set-ntp on
 
 sleep 1
 rm -rf /etc/pacman.d/gnupg
-pacman-key --init 1>/dev/null
-pacman-key --populate archlinuxarm manjaro manjaro-arm 1>/dev/null
+pacman-key --init
+pacman-key --populate archlinuxarm
 
 # DELETE alarm USER
 userdel -f -r alarm
