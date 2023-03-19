@@ -1,38 +1,58 @@
 #!/usr/bin/env sh
 
-# RESIZE ROOT PARTITION
-PART_DEV=`findmnt / -o source -n | cut -f1 -d"["`
+enable_colors() {
+    ALL_OFF="\e[1;0m"
+    BOLD="\e[1;1m"
+    GREEN="${BOLD}\e[1;32m"
+    BLUE="${BOLD}\e[1;34m"
+}
+info() {
+    local mesg=$1; shift
+    printf "${BLUE}  ->${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@"
+}
+error() {
+    local mesg=$1; shift
+    printf "${RED}==> ERROR:${ALL_OFF}${BOLD} ${mesg}${ALL_OFF}\n" "$@"
+}
+check_root () {
+    if [ "$EUID" -ne 0 ]; then
+        error "This utility requires root permissions to run"
+        exit
+    fi
+}
+enable_colors
 
-PART_NAME=`echo $PART_DEV | cut -f3 -d"/"`
+resize() {
+    PART_DEV=`findmnt / -o source -n | cut -f1 -d"["`
+    PART_NAME=`echo $PART_DEV | cut -f3 -d"/"`
+    DEV_NAME=`echo /sys/block/*/${PART_NAME} | cut -f4 -d"/"`
+    DEV="/dev/${DEV_NAME}"
+    PART_NUM=`cat /sys/block/${DEV_NAME}/${PART_NAME}/partition`
+    echo ", +" | sudo sfdisk --no-reread -N $PART_NUM $DEV
 
-DEV_NAME=`echo /sys/block/*/${PART_NAME} | cut -f4 -d"/"`
+    sudo partx -u $DEV
+    sudo resize2fs $PART_DEV
+    sudo timedatectl set-ntp on
+}
+pacman_init() {
+    sudo rm -rf /etc/pacman.d/gnupg
+    sudo pacman-key --init
+    sudo pacman-key --populate archlinuxarm
+}
+yay() {
+    rm -rf /tmp/yay
+    git clone --depth=1 https://aur.archlinux.org/yay-bin.git /tmp/yay
+    sh -c 'cd /tmp/yay && makepkg -ris --noconfirm'
+}
 
-DEV="/dev/${DEV_NAME}"
-
-PART_NUM=`cat /sys/block/${DEV_NAME}/${PART_NAME}/partition`
-
-echo ", +" | sfdisk --no-reread -N $PART_NUM $DEV
-
-partx -u $DEV
-
-resize2fs $PART_DEV
-
-timedatectl set-ntp on
-
+resize
 sleep 1
-rm -rf /etc/pacman.d/gnupg
-pacman-key --init
-pacman-key --populate archlinuxarm
+pacman_init
 
-# DELETE alarm USER
-userdel -f -r alarm
+sudo userdel -f -r alarm
 
-# INSTALL PACKAGES
-pacman -S --needed --noconfirm smartmontools base-devel git tailscale htop mc yt-dlp
+sudo pacman -S --needed --noconfirm smartmontools base-devel git tailscale htop mc yt-dlp ffmpeg jack2
 
-rm -rf /tmp/yay
-git clone --depth=1 https://aur.archlinux.org/yay-bin.git /tmp/yay
-sh -c 'cd /tmp/yay && makepkg -ris --noconfirm'
+yay
 
-# DELETE THIS SCRIPT
 rm post-scriptum
