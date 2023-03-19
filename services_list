@@ -3,3 +3,4 @@ dhcpcd.service
 sshd.service
 systemd-oomd.service
 irqbalance.service
+fstrim.timer

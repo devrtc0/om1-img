@@ -49,6 +49,8 @@ resize
 sleep 1
 pacman_init
 
+sudo hwclock --systohc --utc
+
 sudo userdel -f -r alarm
 
 sudo pacman -S --needed --noconfirm smartmontools base-devel git tailscale htop mc yt-dlp ffmpeg jack2

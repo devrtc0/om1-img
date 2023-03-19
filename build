@@ -154,6 +154,7 @@ ru_RU.UTF-8 UTF-8' > $ROOTFS_IMG/rootfs/etc/locale.gen
     $NSPAWN $ROOTFS_IMG/rootfs mkinitcpio -P
 
     $NSPAWN $ROOTFS_IMG/rootfs sudo -u $CFG_USERNAME mkdir -p /home/${CFG_USERNAME}/.ssh
+    $NSPAWN $ROOTFS_IMG/rootfs sudo -u $CFG_USERNAME mkdir -p /home/${CFG_USERNAME}/downloads
     $NSPAWN $ROOTFS_IMG/rootfs sudo -u $CFG_USERNAME sh -c "printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKPBlmW9r5Y8Zj8cTxECLO9HEY+USByhVDxdPxq++oy2 id_ed25519
 ' > /home/${CFG_USERNAME}/.ssh/authorized_keys"
 
@@ -233,8 +234,9 @@ create_img() {
 	echo "Root UUID is $ROOT_UUID..."
 
 	# Adjust the fstab to use the boot PARTUUID
-	echo "PARTUUID=$BOOT_PART   /boot   vfat     defaults    0   2" > $TMPDIR/root/etc/fstab
+	echo "PARTUUID=$BOOT_PART   /boot   vfat     defaults    0   2" >> $TMPDIR/root/etc/fstab
     echo "PARTUUID=$ROOT_PART   /   $FILESYSTEM     defaults,noatime    0   1" >> $TMPDIR/root/etc/fstab
+    echo "UUID=b7f4d396-ab1e-4f29-bcaf-a07303fbf568     /home/azat/downloads    xfs     defaults,user,noatime,noauto    0   3" >> $TMPDIR/root/etc/fstab
 
     # Clean up
     info "Cleaning up image..."
