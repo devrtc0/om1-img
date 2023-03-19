@@ -4,10 +4,7 @@ COLORS="true"
 HOSTNAME="m1"
 FILESYSTEM="ext4"
 COMPRESSION="zstd"
-RECREATE_IMG="false"
-REMOVE_ROOTFS="false"
 COMPRESS="false"
-AFTER_COMPRESS_REMOVE_ROOTFS="false"
 PROGNAME=${0##*/}
 CURDIR="$(dirname $(readlink -f "$0"))"
 LIBDIR="${CURDIR}/lib"
@@ -69,7 +66,7 @@ show_elapsed_time(){
     msg "Time elapsed: %s minute(s)" "$(elapsed_time $1)"
 }
 check_deps () {
-	pacman -Qii qemu-user-static-binfmt >/dev/null 2>&1 || error 'qemu-user-static-binfmt is not installed'
+	pacman -Qii qemu-user-static-binfmt >/dev/null 2>&1 || (error 'qemu-user-static-binfmt is not installed' && exit 1)
 }
 check_root () {
     if [ "$EUID" -ne 0 ]; then
@@ -88,21 +85,17 @@ check_running() {
 create_rootfs_img() {
 	msg "Creating rootfs image..."
 
-	if [ "$REMOVE_ROOTFS" = "true" ]; then
-		if [ -d "$ROOTFS_IMG/rootfs" ]; then
-	        info "Removing old rootfs..."
-	        rm -rf $ROOTFS_IMG/rootfs
-	    fi
-	fi
+	if [ -d "$ROOTFS_IMG/rootfs" ]; then
+        info "Removing old rootfs..."
+        rm -rf $ROOTFS_IMG/rootfs
+    fi
 	mkdir -p $ROOTFS_IMG/rootfs
-	if [ $(ls "$ROOTFS_IMG/rootfs" | wc -l) -eq 0 ]; then
-		if [ ! -f "$CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz" ]; then
-			echo "No rootfs archive '$CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz'"
-	        exit 1
-	    fi
-	    info "Extracting rootfs..."
-	    bsdtar -xpf $CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz -C $ROOTFS_IMG/rootfs
-	fi
+	if [ ! -f "$CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz" ]; then
+        echo "No rootfs archive '$CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz'"
+        exit 1
+    fi
+    info "Extracting rootfs..."
+    bsdtar -xpf $CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz -C $ROOTFS_IMG/rootfs
 
     info "Setting up keyrings..."
     $NSPAWN $ROOTFS_IMG/rootfs pacman-key --init >/dev/null || abort
@@ -112,40 +105,53 @@ create_rootfs_img() {
 
     msg "Installing packages..."
     mount --bind $PKGDIR/pkg-cache $PKG_CACHE
-    $NSPAWN $ROOTFS_IMG/rootfs \
-                    pacman -Syyu base systemd systemd-libs dialog \
-                                 sudo openssh micro dhcpcd man-pages man-db usbutils zram-generator irqbalance exfatprogs \
-                                 iwd pacman-contrib \
-                                 linux-aarch64 \
-                                  --noconfirm --needed --noprogressbar $PACMAN_COLORS || abort
-    
-    info "Enabling services..."
-    $NSPAWN $ROOTFS_IMG/rootfs systemctl enable getty.target > /dev/null 2>&1
-    $NSPAWN $ROOTFS_IMG/rootfs systemctl enable pacman-init.service > /dev/null 2>&1
 
+    cp $LIBDIR/linux-aarch64.preset $ROOTFS_IMG/rootfs/etc/mkinitcpio.d/linux-aarch64.preset
+    cp $LIBDIR/mkinitcpio.conf $ROOTFS_IMG/rootfs/etc/mkinitcpio.conf
+    $NSPAWN $ROOTFS_IMG/rootfs \
+                    pacman -Syyu base systemd systemd-libs \
+                                 sudo openssh micro dhcpcd man-pages man-db usbutils zram-generator irqbalance exfatprogs \
+                                 pacman-contrib fish \
+                                 linux-aarch64 \
+                                 --noconfirm --needed --noprogressbar $PACMAN_COLORS || abort
+
+    info "Enabling services..."
     local SERVICE
     while read SERVICE; do
         if [ -e $ROOTFS_IMG/rootfs/usr/lib/systemd/system/$SERVICE ]; then
             echo "Enabling service $SERVICE..."
-            $NSPAWN $ROOTFS_IMG/rootfs systemctl enable $SERVICE > /dev/null 2>&1
+            $NSPAWN $ROOTFS_IMG/rootfs systemctl enable $SERVICE >/dev/null 2>&1 || abort
         else
             echo "Service $SERVICE not found in rootfs, skipping"
         fi
     done < "$CURDIR/services_list"
 
 	info "Setting up system settings..."
-    $NSPAWN $ROOTFS_IMG/rootfs update-ca-trust
+    $NSPAWN $ROOTFS_IMG/rootfs update-ca-trust || abort
     echo "$HOSTNAME" > $ROOTFS_IMG/rootfs/etc/hostname
+    echo 'LANG=en_US.UTF-8' > $ROOTFS_IMG/rootfs/etc/locale.conf
+    echo 'KEYMAP=us' > $ROOTFS_IMG/rootfs/etc/vconsole.conf
+    echo 'en_US.UTF-8 UTF-8
+en_GB.UTF-8 UTF-8
+ru_RU.UTF-8 UTF-8' > $ROOTFS_IMG/rootfs/etc/locale.gen
 
-    echo "Enabling SSH login for root user for headless setup..."
-    sed -i s/"#PermitRootLogin prohibit-password"/"PermitRootLogin yes"/g $ROOTFS_IMG/rootfs/etc/ssh/sshd_config
-    sed -i s/"#PermitEmptyPasswords no"/"PermitEmptyPasswords yes"/g $ROOTFS_IMG/rootfs/etc/ssh/sshd_config
+    info 'locale-gen...'
+    $NSPAWN $ROOTFS_IMG/rootfs locale-gen
+    info 'timezone...'
+    $NSPAWN $ROOTFS_IMG/rootfs ln -s /usr/share/zoneinfo/Europe/Samara /etc/localtime
+    info 'root password...'
+    $NSPAWN $ROOTFS_IMG/rootfs printf "root:$CFG_ROOT_PASSWORD" | chpasswd -e
+    info 'add user...'
+    $NSPAWN $ROOTFS_IMG/rootfs useradd -m -g users -G audio,video,power,storage,wheel,scanner,network,users -p "$CFG_USER_PASSWORD" -s /bin/fish $CFG_USERNAME
 
-    echo "Enabling autologin for first setup..."
-    mv $ROOTFS_IMG/rootfs/usr/lib/systemd/system/getty\@.service $ROOTFS_IMG/rootfs/usr/lib/systemd/system/getty\@.service.bak
-    cp $LIBDIR/getty\@.service $ROOTFS_IMG/rootfs/usr/lib/systemd/system/getty\@.service
+    $NSPAWN $ROOTFS_IMG/rootfs mkinitcpio -P
+
+    $NSPAWN $ROOTFS_IMG/rootfs sudo -u $CFG_USERNAME mkdir -p /home/${CFG_USERNAME}/.ssh
+    $NSPAWN $ROOTFS_IMG/rootfs sudo -u $CFG_USERNAME sh -c "printf 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKPBlmW9r5Y8Zj8cTxECLO9HEY+USByhVDxdPxq++oy2 id_ed25519
+' > /home/${CFG_USERNAME}/.ssh/authorized_keys"
 
 	echo "[zram0]" > $ROOTFS_IMG/rootfs/etc/systemd/zram-generator.conf
+    echo "%wheel ALL=(ALL) ALL" > $ROOTFS_IMG/rootfs/etc/sudoers.d/wheel
 
     info "Removing unwanted files from rootfs..."
     prune_cache
@@ -156,6 +162,7 @@ create_rootfs_img() {
     rm -f $ROOTFS_IMG/rootfs/usr/lib/systemd/system/systemd-firstboot.service
     rm -f $ROOTFS_IMG/rootfs/etc/machine-id
     rm -rf $ROOTFS_IMG/rootfs/etc/pacman.d/gnupg
+    rm -rf $ROOTFS_IMG/rootfs/boot/initramfs-linux-fallback.img
 
     msg "Creating rootfs image completed successfully"
 }
@@ -165,7 +172,7 @@ create_img() {
 
 	SIZE=$(du -s --block-size=MB $CHROOTDIR | awk '{ print $1 }' | sed -e 's/MB//g')
 	info "Total size of packages $SIZE MB"
-    EXTRA_SIZE=500
+    EXTRA_SIZE=600
     REAL_SIZE=`echo "$(($SIZE+$EXTRA_SIZE))"`
 
 	# Make blank .img to be used
@@ -198,10 +205,13 @@ create_img() {
     mount ${LDEV}p1 $TMPDIR/boot
     mount ${LDEV}p2 $TMPDIR/root
     cp -a $ROOTFS_IMG/rootfs/* $TMPDIR/root
+
     mv $TMPDIR/root/boot/* $TMPDIR/boot
 	# Write the boot loader images
     dd if=$TMPDIR/boot/idbloader.img of=${LDEV} seek=64 conv=notrunc,fsync > /dev/null 2>&1
     dd if=$TMPDIR/boot/u-boot.itb of=${LDEV} seek=16384 conv=notrunc,fsync > /dev/null 2>&1
+
+    cp $CURDIR/odroid-m1-boot/boot.scr $TMPDIR/boot/
     # Fetch the PARTUUIDs
     BOOT_PART=$(lsblk -p -o NAME,PARTUUID | grep "${LDEV}p1" | awk '{ print $2 }')
     ROOT_PART=$(lsblk -p -o NAME,PARTUUID | grep "${LDEV}p2" | awk '{ print $2 }')
@@ -211,18 +221,8 @@ create_img() {
 	echo "Root UUID is $ROOT_UUID..."
 
 	# Adjust the fstab to use the boot PARTUUID
-	sed -i "s/LABEL=BOOT_ARCH/PARTUUID=$BOOT_PART/g" $TMPDIR/root/etc/fstab
-	# Adjust the boot loader configuration to use the root PARTUUID
-    if [ -f $TMPDIR/boot/extlinux/extlinux.conf ]; then
-        sed -i "s/LABEL=ROOT_ARCH/PARTUUID=$ROOT_PART/g" $TMPDIR/boot/extlinux/extlinux.conf
-    elif [ -f $TMPDIR/boot/efi/extlinux/extlinux.conf ]; then
-        sed -i "s/LABEL=ROOT_ARCH/PARTUUID=$ROOT_PART/g" $TMPDIR/boot/efi/extlinux/extlinux.conf
-    elif [ -f $TMPDIR/boot/boot.ini ]; then
-        sed -i "s/LABEL=ROOT_ARCH/PARTUUID=$ROOT_PART/g" $TMPDIR/boot/boot.ini
-    elif [ -f $TMPDIR/boot/uEnv.ini ]; then
-        sed -i "s/LABEL=ROOT_ARCH/PARTUUID=$ROOT_PART/g" $TMPDIR/boot/uEnv.ini
-    fi
-    echo "PARTUUID=$ROOT_PART   /   $FILESYSTEM     defaults    0   1" >> $TMPDIR/root/etc/fstab
+	echo "PARTUUID=$BOOT_PART   /boot   vfat     defaults    0   2" > $TMPDIR/root/etc/fstab
+    echo "PARTUUID=$ROOT_PART   /   $FILESYSTEM     defaults,noatime    0   1" >> $TMPDIR/root/etc/fstab
 
     # Clean up
     info "Cleaning up image..."
@@ -239,6 +239,7 @@ create_img() {
     fi
     partprobe $LDEV > /dev/null 2>&1
     chmod 0666 $IMGDIR/$IMGNAME.img
+    info "Image $IMGDIR/$IMGNAME.img"
 }
 compress() {
 	info "Compressing $IMGNAME.img with $COMPRESSION..."
@@ -266,14 +267,25 @@ compress() {
 	mount | grep "$ROOTFS_IMG/rootfs/var/cache/pacman/pkg"
     STATUS=$?
     [ $STATUS -eq 0 ] && umount $ROOTFS_IMG/rootfs_$ARCH/var/cache/pacman/pkg
-	if [ "$AFTER_COMPRESS_REMOVE_ROOTFS" = "true" ]; then
-		info "Removing rootfs..."
-	    rm -rf $CHROOTDIR
-	fi
+	info "Removing rootfs..."
+	rm -rf $CHROOTDIR
 }
 # ********************************************************************
 # ********************************************************************
 # ********************************************************************
+
+. ./.env
+if [ -z "$CFG_USERNAME" ]; then
+    error "CFG_USERNAME not set"
+fi
+if [ -z "$CFG_USER_PASSWORD" ]; then
+    error "CFG_USER_PASSWORD not set"
+fi
+if [ -z "$CFG_ROOT_PASSWORD" ]; then
+    error "CFG_ROOT_PASSWORD not set"
+fi
+
+exit
 
 [ "$COLORS" = "true" ] && enable_colors
 check_deps
@@ -283,9 +295,7 @@ timer_start=$(get_timer)
 
 create_rootfs_img 2>&1
 
-if [ "$RECREATE_IMG" = "true" ]; then
-	create_img 2>&1
-fi
+create_img 2>&1
 
 if [ "$COMPRESS" = "true" ]; then
 	compress 2>&1
