@@ -20,6 +20,7 @@ IMGDIR="/var/cache/alarm/img"
 
 mkdir -p ${PKGDIR}/pkg-cache
 mkdir -p ${IMGDIR}
+mkdir -p ${TMPDIR}
 
 enable_colors() {
     ALL_OFF="\e[1;0m"
@@ -89,12 +90,16 @@ create_rootfs_img() {
         info "Removing old rootfs..."
         rm -rf $ROOTFS_IMG/rootfs
     fi
-	mkdir -p $ROOTFS_IMG/rootfs
-	if [ ! -f "$CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz" ]; then
-        echo "No rootfs archive '$CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz'"
-        exit 1
+	if [ ! -f "$TMPDIR/ArchLinuxARM-aarch64-latest.tar.gz" ]; then
+        info "Downloading alarm..."
+        curl -L "http://mirror.yandex.ru/archlinux-arm/os/ArchLinuxARM-aarch64-latest.tar.gz" -o "$TMPDIR/ArchLinuxARM-aarch64-latest.tar.gz"
+        if [ $? -ne 0 ]; then
+            echo "Downloading alarm failed"
+            exit 1
+        fi
     fi
     info "Extracting rootfs..."
+	mkdir -p $ROOTFS_IMG/rootfs
     bsdtar -xpf $CURDIR/../ArchLinuxARM-aarch64-latest.tar.gz -C $ROOTFS_IMG/rootfs
 
     info "Setting up keyrings..."
@@ -108,6 +113,8 @@ create_rootfs_img() {
 
     cp $LIBDIR/linux-aarch64.preset $ROOTFS_IMG/rootfs/etc/mkinitcpio.d/linux-aarch64.preset
     cp $LIBDIR/mkinitcpio.conf $ROOTFS_IMG/rootfs/etc/mkinitcpio.conf
+    cp $LIBDIR/pacman.conf $ROOTFS_IMG/rootfs/etc/pacman.conf
+    cp $LIBDIR/journald.conf $ROOTFS_IMG/rootfs/etc/systemd/journald.conf
     $NSPAWN $ROOTFS_IMG/rootfs \
                     pacman -Syyu base systemd systemd-libs \
                                  sudo openssh micro dhcpcd man-pages man-db usbutils zram-generator irqbalance exfatprogs \
@@ -152,6 +159,8 @@ ru_RU.UTF-8 UTF-8' > $ROOTFS_IMG/rootfs/etc/locale.gen
 
 	echo "[zram0]" > $ROOTFS_IMG/rootfs/etc/systemd/zram-generator.conf
     echo "%wheel ALL=(ALL) ALL" > $ROOTFS_IMG/rootfs/etc/sudoers.d/wheel
+
+    cp $LIBDIR/post-scriptum $ROOTFS_IMG/rootfs/home/${CFG_USERNAME}/
 
     info "Removing unwanted files from rootfs..."
     prune_cache
@@ -211,7 +220,7 @@ create_img() {
     dd if=$TMPDIR/boot/idbloader.img of=${LDEV} seek=64 conv=notrunc,fsync > /dev/null 2>&1
     dd if=$TMPDIR/boot/u-boot.itb of=${LDEV} seek=16384 conv=notrunc,fsync > /dev/null 2>&1
 
-    cp $CURDIR/odroid-m1-boot/boot.scr $TMPDIR/boot/
+    mkimage -T script -d $LIBDIR/boot_arch_kernel.txt $TMPDIR/boot/boot.scr
     # Fetch the PARTUUIDs
     BOOT_PART=$(lsblk -p -o NAME,PARTUUID | grep "${LDEV}p1" | awk '{ print $2 }')
     ROOT_PART=$(lsblk -p -o NAME,PARTUUID | grep "${LDEV}p2" | awk '{ print $2 }')
@@ -284,8 +293,6 @@ fi
 if [ -z "$CFG_ROOT_PASSWORD" ]; then
     error "CFG_ROOT_PASSWORD not set"
 fi
-
-exit
 
 [ "$COLORS" = "true" ] && enable_colors
 check_deps

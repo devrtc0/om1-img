@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+
+# RESIZE ROOT PARTITION
+PART_DEV=`findmnt / -o source -n | cut -f1 -d"["`
+
+PART_NAME=`echo $PART_DEV | cut -f3 -d"/"`
+
+DEV_NAME=`echo /sys/block/*/${PART_NAME} | cut -f4 -d"/"`
+
+DEV="/dev/${DEV_NAME}"
+
+PART_NUM=`cat /sys/block/${DEV_NAME}/${PART_NAME}/partition`
+
+echo ", +" | sfdisk --no-reread -N $PART_NUM $DEV
+
+partx -u $DEV
+
+resize2fs $PART_DEV
+
+timedatectl set-ntp on
+
+sleep 1
+rm -rf /etc/pacman.d/gnupg
+pacman-key --init 1>/dev/null
+pacman-key --populate archlinuxarm manjaro manjaro-arm 1>/dev/null
+
+# DELETE alarm USER
+userdel -f -r alarm
+
+# INSTALL PACKAGES
+pacman -S --needed --noconfirm smartmontools base-devel git tailscale htop mc yt-dlp
+
+rm -rf /tmp/yay
+git clone --depth=1 https://aur.archlinux.org/yay-bin.git /tmp/yay
+sh -c 'cd /tmp/yay && makepkg -ris --noconfirm'
+
+# DELETE THIS SCRIPT
+rm post-scriptum
