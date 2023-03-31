@@ -168,6 +168,7 @@ ru_RU.UTF-8 UTF-8' > $ROOTFS_IMG/rootfs/etc/locale.gen
     cp $LIBDIR/post-scriptum $ROOTFS_IMG/rootfs/home/${CFG_USERNAME}/
     cp $LIBDIR/slp.sh $ROOTFS_IMG/rootfs/home/${CFG_USERNAME}/
     cp $LIBDIR/start-ace.sh $ROOTFS_IMG/rootfs/home/${CFG_USERNAME}/
+    cp $LIBDIR/start-transmission.sh $ROOTFS_IMG/rootfs/home/${CFG_USERNAME}/
     $NSPAWN $ROOTFS_IMG/rootfs chown "${CFG_USERNAME}:users" /home/${CFG_USERNAME}/post-scriptum /home/${CFG_USERNAME}/slp.sh /home/${CFG_USERNAME}/start-ace.sh
 
     info "Removing unwanted files from rootfs..."
