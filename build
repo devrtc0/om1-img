@@ -148,6 +148,10 @@ ru_RU.UTF-8 UTF-8' > $ROOTFS_IMG/rootfs/etc/locale.gen
     $NSPAWN $ROOTFS_IMG/rootfs ln -s /usr/share/zoneinfo/Europe/Samara /etc/localtime
     info 'root password...'
     $NSPAWN $ROOTFS_IMG/rootfs printf "root:$CFG_ROOT_PASSWORD" | chpasswd -e
+    
+    info 'delete alarm...'
+    $NSPAWN $ROOTFS_IMG/rootfs  userdel -f -r alarm
+    
     info 'add user...'
     $NSPAWN $ROOTFS_IMG/rootfs useradd -m -g users -G audio,video,power,storage,wheel,scanner,network,users -p "$CFG_USER_PASSWORD" -s /bin/fish $CFG_USERNAME
 
